@@ -40,41 +40,6 @@ function makeDir($name)
     return $success;
 }
 
-/**
- * Generate a CSRF-like token, to use in GET requests for stuff that ought to be POST-ed forms.
- *
- * @return string $token
- */
-function getToken()
-{
-    $seed = $_SERVER['REMOTE_ADDR'] . $_SERVER['HTTP_USER_AGENT'] . $_COOKIE['bolt_session'];
-    $token = substr(md5($seed), 0, 8);
-
-    return $token;
-}
-
-/**
- * Check if a given token matches the current (correct) CSRF-like token
- *
- * @param string $token
- * @return bool
- */
-function checkToken($token = "")
-{
-    global $app;
-
-    if (empty($token)) {
-        $token = $app['request']->get('token');
-    }
-
-    if ($token === getToken()) {
-        return true;
-    } else {
-        $app['session']->getFlashBag()->set('error', "The security token was incorrect. Please try again.");
-
-        return false;
-    }
-}
 
 /**
  * Clean posted data. Convert tabs to spaces (primarily for yaml) and
@@ -763,7 +728,7 @@ function getPaths($original = array())
     }
 
     // Make sure we're not trying to access bolt as "/index.php/bolt/", because all paths will be broken.
-    if (!empty($_SERVER['REQUEST_URI']) && strpos($_SERVER['REQUEST_URI'], "/index.php") !== false) {
+    if (!empty($_SERVER['REQUEST_URI']) && strpos($_SERVER['REQUEST_URI'], "/index.php/") !== false) {
         simpleredirect(str_replace("/index.php", "", $_SERVER['REQUEST_URI']));
     }
 
@@ -1094,9 +1059,17 @@ function loadSerialize($filename, $silent = false)
     }
 
     $serialized_data = trim(implode("", file($filename)));
+    $serialized_data = str_replace("<?php /* bolt */ die(); ?".">", "", $serialized_data);
 
-    $serialized_data = str_replace("<?php /* bolt */ die(); ?>", "", $serialized_data);
+    // new-style JSON-encoded data; detect automatically
+    if (substr($serialized_data, 0, 5) === 'json:') {
+        $serialized_data = substr($serialized_data, 5);
+        $data = json_decode($serialized_data, true);
+        return $data;
+    }
 
+    // old-style serialized data; to be phased out, but leaving intact for
+    // backwards-compatibility
     @$data = unserialize($serialized_data);
     if (is_array($data)) {
         return $data;
@@ -1127,7 +1100,7 @@ function saveSerialize($filename, &$data)
 {
     $filename = fixPath($filename);
 
-    $ser_string = "<?php /* bolt */ die(); ?>".serialize($data);
+    $ser_string = "<?php /* bolt */ die(); ?".">json:" . json_encode($data);
 
     // disallow user to interrupt
     ignore_user_abort(true);
@@ -1180,7 +1153,7 @@ function saveSerialize($filename, &$data)
             'webuser (ie: 777 or 766, depending on the setup of your server). <br /><br />' .
             'Current path: ' . getcwd() . '.'
         );
-        debug_printbacktrace();
+        debug_print_backtrace();
         die();
     }
     umask($old_umask);
@@ -1230,12 +1203,20 @@ function str_replace_first($search, $replace, $subject)
  * @return array
  * @author Daniel <daniel (at) danielsmedegaardbuus (dot) dk>
  * @author Gabriel Sobrinho <gabriel (dot) sobrinho (at) gmail (dot) com>
+ * @author Bob for bolt-specific excludes
  */
 function array_merge_recursive_distinct (array &$array1, array &$array2)
 {
     $merged = $array1;
 
     foreach ($array2 as $key => &$value) {
+
+        // if $key = 'accept_file_types, don't merge..
+        if ($key == 'accept_file_types') {
+            $merged[$key] = $array2[$key];
+            continue;
+        }
+
         if (is_array($value) && isset($merged[$key]) && is_array($merged[$key])) {
             $merged[$key] = array_merge_recursive_distinct($merged [$key], $value);
         } else {
@@ -1681,4 +1662,19 @@ function gatherTranslatableStrings($locale = null, $translated = array())
     ksort($ctype_domain['translated']);
 
     return array($msg_domain, $ctype_domain);
+}
+
+/**
+ * Leniently decode a serialized compound data structure, detecting whether
+ * it's dealing with JSON-encoded data or a PHP-serialized string.
+ */
+function smart_unserialize($str, $assoc = true) {
+    if ($str[0] === '{' || $str[0] === '[') {
+        $data = json_decode($str, $assoc);
+        if ($data !== false) {
+            return $data;
+        }
+    }
+    $data = unserialize($str);
+    return $data;
 }
